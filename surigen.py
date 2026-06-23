@@ -4,6 +4,7 @@
 # Copyright 2013, 2014 Alexandre Deloup (bl2ru)
 # Copyright 2017 Robin Marsollier
 # Copyright 2017 Michael Muenz
+# Copyright 2026 Konstantinos Spartalis
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -26,217 +27,269 @@ import re
 # 1. add the base rule thereafter
 # 2. create the gen_SMTHG_rule() function that is going to generate the rules
 #        using the baserule defined before
-# 3. modify the generate_rules() function to call your new generator
+# 3. modify the __generate_rules__() function to call your new generator
+#
+# Format positions for all rules:
+#   IP rules:   {0}=dest_ip, {1}=org, {2}=name, {3}=dest_ip, {4}=ref, {5}=classtype, {6}=sid
+#   DNS rule:   {0}=org, {1}=name, {2}=domain,  {3}=domain,  {4}=ref, {5}=classtype, {6}=sid
+#   URL rule:   {0}=org, {1}=name, {2}=uri, {3}=uri, {4}=extra_content, {5}=ref, {6}=classtype, {7}=sid
+#   TLS rule:   {0}=org, {1}=name, {2}=domain,  {3}=domain,  {4}=ref, {5}=classtype, {6}=sid
+#   MD5 rule:   {0}=org, {1}=name, {2}=basename, {3}=filepath, {4}=ref, {5}=classtype, {6}=sid
 #####
-IP_UDP_BASERULE = 'alert udp $HOME_NET any -> {} any (msg:"{} - {} - UDP traffic to {}"; classtype:{}; sid:{}; rev:1;)'
-IP_TCP_BASERULE = 'alert tcp $HOME_NET any -> {} any (msg:"{} - {} - TCP traffic to {}"; flow:to_server,established; classtype:{}; sid:{}; rev:1;)'
-IP_BASERULE = 'alert ip $HOME_NET any -> {} any (msg:"{} - {} - IP traffic to {}"; classtype:{}; sid:{}; rev:1;)'
-#DNS_BASERULE = 'alert udp $HOME_NET any -> any 53 (msg:"{} - {} - DNS request for {}"; content:"|01 00 00 01 00 00 00 00 00 00|"; depth:20; offset: 2; content:"{}"; flow:to_server; fast_pattern:only; nocase; classtype:trojan-activity; reference:url,{}; sid:{}; rev:1;)'
-DNS_BASERULE = 'alert dns $HOME_NET any -> any 53 (msg:"{} - {} - DNS request for {}"; dns_query; content:"{}"; nocase; classtype:{}; sid:{};)'
-URL_BASERULE = 'alert http $HOME_NET any -> $EXTERNAL_NET $HTTP_PORTS (msg:"{} - {} - Related URL ({})"; content:"{}"; http_uri;{} flow:to_server,established; classtype:{}; sid:{}; rev:1;)'
-TLS_BASERULE = 'alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"{} - {} - Related TLS SNI ({})"; tls_sni; content:"{}";flow:to_server,established; classtype:{}; sid:{}; rev:1;)'
-MD5_BASERULE = 'alert tcp any [$HTTP_PORTS, 25] -> $HOME_NET any (msg:"{} - {} - MD5 hash found in blacklist {}"; filestore; filemd5:{}; classtype:{}; sid:{}; rev:1;)'
+
+IP_UDP_BASERULE = (
+    'alert udp $HOME_NET any -> {0} any '
+    '(msg:"{1} - {2} - UDP traffic to {3}"; '
+    'reference:url,{4}; classtype:{5}; sid:{6}; rev:1;)'
+)
+IP_TCP_BASERULE = (
+    'alert tcp $HOME_NET any -> {0} any '
+    '(msg:"{1} - {2} - TCP traffic to {3}"; '
+    'flow:to_server,established; reference:url,{4}; classtype:{5}; sid:{6}; rev:1;)'
+)
+IP_BASERULE = (
+    'alert ip $HOME_NET any -> {0} any '
+    '(msg:"{1} - {2} - IP traffic to {3}"; '
+    'reference:url,{4}; classtype:{5}; sid:{6}; rev:1;)'
+)
+DNS_BASERULE = (
+    'alert dns $HOME_NET any -> any 53 '
+    '(msg:"{0} - {1} - DNS request for {2}"; '
+    'dns.query; content:"{3}"; nocase; '
+    'reference:url,{4}; classtype:{5}; sid:{6}; rev:1;)'
+)
+URL_BASERULE = (
+    'alert http $HOME_NET any -> $EXTERNAL_NET $HTTP_PORTS '
+    '(msg:"{0} - {1} - Related URL ({2})"; '
+    'http.uri; content:"{3}";{4} '
+    'flow:to_server,established; reference:url,{5}; classtype:{6}; sid:{7}; rev:1;)'
+)
+TLS_BASERULE = (
+    'alert tls $HOME_NET any -> $EXTERNAL_NET any '
+    '(msg:"{0} - {1} - Related TLS SNI ({2})"; '
+    'tls.sni; content:"{3}"; '
+    'flow:to_server,established; reference:url,{4}; classtype:{5}; sid:{6}; rev:1;)'
+)
+MD5_BASERULE = (
+    'alert tcp any [$HTTP_PORTS, 25] -> $HOME_NET any '
+    '(msg:"{0} - {1} - MD5 hash found in blacklist {2}"; '
+    'filestore; filemd5:{3}; '
+    'reference:url,{4}; classtype:{5}; sid:{6}; rev:1;)'
+)
+
+# Regex for a bare IPv4 address (no CIDR, no trailing chars)
+_IP_RE = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
 
 
 class Surigen:
-    _sid_ = 0
-    _org_ = ""
+    def __init__(self, org, sid, classtype):
+        '''
+        Initialise org, classtype, and the starting SID for this run.
+        org and classtype are always set first so __del__ never fires
+        against uninitialised state even if we return early.
+        '''
+        self._org_ = org
+        self._classtype_ = classtype
+        self._sid_ = 5100000  # safe default
 
-    def __init__(self, org, sid):
-        '''
-        get sid to use for this run
-        '''
-        if not sid or sid == "log":
+        if not sid:
             try:
-                with open(".sid_log_file", "r", encoding="utf-8") as f_sid_log_file:
-                    line = f_sid_log_file.readline()
-                    self._sid_ = int(line)
+                with open(".sid_log_file", "r", encoding="utf-8") as f:
+                    self._sid_ = int(f.readline().strip())
             except FileNotFoundError:
                 print("[-] .sid_log_file not found, starting SID from 5100000")
-                return
             except PermissionError as err:
                 print(err)
                 print("[+] Aborting!")
                 quit(0)
         else:
             self._sid_ = sid
-        Surigen._org_ = org
 
     def __del__(self):
         '''
-        save sid to use for next run
+        Save the next-available SID for the following run.
         '''
         try:
-            with open(".sid_log_file", "w", encoding="utf-8") as f_sid:
-                f_sid.write("{}".format(self._sid_))
+            with open(".sid_log_file", "w", encoding="utf-8") as f:
+                f.write(str(self._sid_))
         except PermissionError as err:
             print(err)
-            print("[-] sid not saved, be carefull")
+            print("[-] sid not saved, be careful")
             return False
         return True
 
-    def gen_dns_rule(self, name, domain, ref):
-        '''
-        Generate suricata rule for a domain
-        '''
-        dns_request = domain
-        rule = (DNS_BASERULE.format(self._org_, name, domain, dns_request, ref, self._sid_))
+    def _next_sid(self):
+        sid = self._sid_
         self._sid_ += 1
-        return rule, self._sid_-1
+        return sid
+
+    def gen_dns_rule(self, name, domain, ref):
+        '''Generate a Suricata rule matching a DNS query for domain.'''
+        sid = self._next_sid()
+        rule = DNS_BASERULE.format(
+            self._org_, name, domain, domain, ref, self._classtype_, sid
+        )
+        return rule, sid
 
     def gen_uri_rule(self, name, url, ref):
-        '''
-        Generate suricata rule for an url
-        '''
+        '''Generate a Suricata rule matching an HTTP URI.'''
         uri = url.split("?")[0]
-        # If there are many "?" in the complete url, colapse them
         uri_params = "?".join(url.split("?")[1:])
-        rule_content = ""
+        extra = ""
         if uri_params:
             params = uri_params.split("&")
-            rule_content = ' content:"?{}=";'.format(params[0].split("=")[0])
+            extra = ' content:"?{}=";'.format(params[0].split("=")[0])
             for param in params[1:]:
-                # escaping ';'
                 param = param.replace(';', r'|3b|')
-                rule_content += ' content:"&{}=";'.format(param.split("=")[0])
-        rule = (URL_BASERULE.format(self._org_, name, uri, uri, rule_content, ref, self._sid_))
-        self._sid_ += 1
-        return rule, self._sid_ - 1
+                extra += ' content:"&{}=";'.format(param.split("=")[0])
+        sid = self._next_sid()
+        rule = URL_BASERULE.format(
+            self._org_, name, uri, uri, extra, ref, self._classtype_, sid
+        )
+        return rule, sid
 
     def gen_ip_rule_udp(self, name, ip_addr, ref):
-        '''
-        Generate suricata rule for an IP, traffic over udp
-        '''
-        rule = (IP_UDP_BASERULE.format(ip_addr, self._org_, name, ip_addr, ref, self._sid_))
-        self._sid_ += 1
-        return rule, self._sid_-1
+        '''Generate a Suricata rule for UDP traffic to an IP.'''
+        sid = self._next_sid()
+        rule = IP_UDP_BASERULE.format(
+            ip_addr, self._org_, name, ip_addr, ref, self._classtype_, sid
+        )
+        return rule, sid
 
     def gen_ip_rule_tcp(self, name, ip_addr, ref):
-        '''
-        Generate suricata rule for an IP, traffic over tcp
-        '''
-        rule = (IP_TCP_BASERULE.format(ip_addr, self._org_, name, ip_addr, ref, self._sid_))
-        self._sid_ += 1
-        return rule, self._sid_-1
+        '''Generate a Suricata rule for TCP traffic to an IP.'''
+        sid = self._next_sid()
+        rule = IP_TCP_BASERULE.format(
+            ip_addr, self._org_, name, ip_addr, ref, self._classtype_, sid
+        )
+        return rule, sid
 
     def gen_ip_rule(self, name, ip_addr, ref):
-        '''
-        Generate suricata rule for an IP
-        '''
-        rule = (IP_BASERULE.format(ip_addr, self._org_, name, ip_addr, ref, self._sid_))
-        self._sid_ += 1
-        return rule, self._sid_-1
+        '''Generate a Suricata rule for any IP traffic to an IP.'''
+        sid = self._next_sid()
+        rule = IP_BASERULE.format(
+            ip_addr, self._org_, name, ip_addr, ref, self._classtype_, sid
+        )
+        return rule, sid
 
     def gen_tls_rule(self, name, domain, ref):
-        '''
-        Generate suricata TLS SNI rule for a domain
-        '''
-        rule = (TLS_BASERULE.format(self._org_, name, domain, domain, ref, self._sid_))
-        self._sid_ += 1
-        return rule, self._sid_-1
+        '''Generate a Suricata rule matching a TLS SNI for domain.'''
+        sid = self._next_sid()
+        rule = TLS_BASERULE.format(
+            self._org_, name, domain, domain, ref, self._classtype_, sid
+        )
+        return rule, sid
 
     def gen_md5_rule(self, name, filepath, ref):
         '''
-        Check if filename is a path or a filename
-        :param name: Threat name
-        :param filepath: Can be a path or a filename. If your md5 file is in /etc/suricata/rules you can just pass a filename.
-                         Else, you need a full path.
-        :param ref: reference_url
-        :return: The generated rule and the new sid
+        Generate a Suricata rule checking file MD5 against a hash list.
+        filepath must point to a file containing one MD5 per line.
         '''
-        rule = (MD5_BASERULE.format(self._org_, name, os.path.basename(filepath), filepath, ref, self._sid_))
-        self._sid_ += 1
-        return rule, self._sid_-1
+        sid = self._next_sid()
+        rule = MD5_BASERULE.format(
+            self._org_, name, os.path.basename(filepath), filepath,
+            ref, self._classtype_, sid
+        )
+        return rule, sid
 
 
 def __split_line__(line):
     '''
-    Cut the line to extract the different fields
+    Split a whitespace-delimited input line into (name, ioc, ref_url).
+    Expected column order: name  ref_url  ioc
+    Returns ("", "", "") for malformed lines.
     '''
-    (name, ref_url, ioc) = line.split(' ')
-    name = name.strip()
-    ref_url = ref_url.strip()
-    ioc = ioc.strip()
-    return name, ioc, ref_url
+    parts = line.split()
+    if len(parts) < 3:
+        return "", "", ""
+    return parts[0], parts[2], parts[1]
 
 
 def __generate_rules__(gen, csv_file):
     '''
-    Determine ioc type and call the differents generators
+    Read the IOC file and dispatch each entry to the appropriate generator.
     '''
     try:
-        with open(csv_file, "r") as f_input:
+        with open(csv_file, "r", encoding="utf-8") as f_input:
             rules = []
             for line in f_input:
                 line = line.strip()
-                (name, ioc, ref_url) = __split_line__(line)
+                if not line or line.startswith('#'):
+                    continue
+                name, ioc, ref_url = __split_line__(line)
+                if not name:
+                    continue
+
                 if (ioc.startswith("/") or ioc.startswith("http")) and not os.path.isfile(ioc):
-                    print("a")
-                    # URI it is
-                    (rule, sid) = gen.gen_uri_rule(name, ioc, ref_url)
+                    # Looks like a URI path or full URL
+                    rule, _ = gen.gen_uri_rule(name, ioc, ref_url)
                     rules.append(rule)
-                elif re.match(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", ioc):
-                    # IP it is
-                    # (rule, sid) = gen.gen_ip_rule_udp(name, ioc, ref_url)
-                    # rules.append(rule)
-                    # (rule, sid) = gen.gen_ip_rule_tcp(name, ioc, ref_url)
-                    # rules.append(rule)
-                    (rule, sid) = gen.gen_ip_rule(name, ioc, ref_url)
+
+                elif _IP_RE.match(ioc):
+                    # Bare IPv4 address (CIDR notation falls through to FQDN branch)
+                    rule, _ = gen.gen_ip_rule(name, ioc, ref_url)
                     rules.append(rule)
+
                 elif os.path.isfile(ioc):
-                    (rule, sid) = gen.gen_md5_rule(name, ioc, ref_url)
+                    # Path to a file of MD5 hashes
+                    rule, _ = gen.gen_md5_rule(name, ioc, ref_url)
                     rules.append(rule)
+
                 else:
-                    # Well, by lack of other option, let's say it is a FQDN
-                    (rule, sid) = gen.gen_dns_rule(name, ioc, ref_url)
+                    # Treat as FQDN: emit DNS + HTTP + TLS rules
+                    rule, _ = gen.gen_dns_rule(name, ioc, ref_url)
                     rules.append(rule)
-                    (rule, sid) = gen.gen_uri_rule(name, ioc, ref_url)
+                    rule, _ = gen.gen_uri_rule(name, ioc, ref_url)
                     rules.append(rule)
-                    (rule, sid) = gen.gen_tls_rule(name, ioc, ref_url)
+                    rule, _ = gen.gen_tls_rule(name, ioc, ref_url)
                     rules.append(rule)
+
     except PermissionError as err:
         print(err)
         print("[+] Aborting!")
         quit(0)
+
     return rules
 
 
 def main(args):
-    '''
-    main
-    '''
-    gen = Surigen(args.emitter, args.ssid)
+    gen = Surigen(args.emitter, args.ssid, args.classtype)
 
-    #############################
-    #       Generating rules
     if args.output:
         print("[+] Generating rules")
     rules = __generate_rules__(gen, args.file)
 
-    #############################
-    #       Writing rules to file or stdout
     if args.output:
-        print("[+] Writing Rule file")
+        print("[+] Writing rule file")
         try:
-            with open(args.output, "a") as f_out:
+            with open(args.output, "a", encoding="utf-8") as f_out:
                 for rule in rules:
-                    f_out.write("{} \n".format(rule))
+                    f_out.write(rule + "\n")
         except PermissionError:
             print("[+] Can't write rule file, permission denied")
-            print("[+] Rules not saved, be carefull")
+            print("[+] Rules not saved, be careful")
     else:
         for rule in rules:
-            print("{}".format(rule))
+            print(rule)
 
 
 if __name__ == '__main__':
-    __parser__ = argparse.ArgumentParser()
-    __parser__.add_argument("file", help="Input file")
+    __parser__ = argparse.ArgumentParser(
+        description="Generate Suricata 8+ rules from an IOC list."
+    )
+    __parser__.add_argument("file",
+                            help="Input file (columns: name  ref_url  ioc)")
     __parser__.add_argument("--output", "-o",
-                            help="Output file (default is stdout)")
+                            help="Output file (default: stdout)")
     __parser__.add_argument("--ssid", "-s",
-                            help="Starting sid of the generated rules", type=int)
+                            help="Starting SID (default: read from .sid_log_file)",
+                            type=int)
     __parser__.add_argument("--emitter", "-e",
-                            help="Emitter of the rules, default: surigen", default="surigen")
+                            help="Rule emitter/org tag (default: surigen)",
+                            default="surigen")
+    __parser__.add_argument("--classtype", "-c",
+                            help="Suricata classtype for all generated rules "
+                                 "(default: trojan-activity)",
+                            default="trojan-activity")
     __args__ = __parser__.parse_args()
     main(__args__)
