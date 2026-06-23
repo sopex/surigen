@@ -18,4 +18,4 @@ python3 surigen.py -o opnsense.mail.rules -s 54000000 -e OPN_Mail mail.lst
 
 python3 surigen.py -o opnsense.media_streaming.rules -s 55000000 -e OPN_Media_Streaming streaming-media.lst
 
-python3 surigen.py -o opnsense.adult.rules -s 56000000 -e OPN_Uncategorized uncategorized.lst
+python3 surigen.py -o opnsense.adult.rules -s 56000000 -e OPN_Uncategorized adult.lst
