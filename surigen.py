@@ -289,7 +289,7 @@ if __name__ == '__main__':
                             default="surigen")
     __parser__.add_argument("--classtype", "-c",
                             help="Suricata classtype for all generated rules "
-                                 "(default: trojan-activity)",
-                            default="trojan-activity")
+                                 "(default: policy-violation)",
+                            default="policy-violation")
     __args__ = __parser__.parse_args()
     main(__args__)
