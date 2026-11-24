@@ -1,10 +1,7 @@
 # surigen
-Suricata Rulegenerator
+Suricata rule generator
 
 This software is forked from bl2ru2 https://github.com/conix-security/bl2ru2
-
-Feel free to fork, push PRs or do whatever with it! 
-
 
 How to build the OPNsense rules:
 
