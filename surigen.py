@@ -277,10 +277,8 @@ def __generate_rules__(gen, csv_file):
                     rule, _ = gen.gen_tls_rule(name, ioc, ref_url)
                     entry_rules.append(rule)
 
-                if is_deprecated:
-                    for r in entry_rules:
-                        rules.append(f"# [DEPRECATED] {r}")
-                else:
+                # Deprecated entries reserve their SIDs without emitting rules.
+                if not is_deprecated:
                     rules.extend(entry_rules)
 
     except PermissionError as err:
